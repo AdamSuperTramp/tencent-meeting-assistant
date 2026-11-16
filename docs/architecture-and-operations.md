@@ -1,0 +1,34 @@
+# 架构与运行说明
+
+## 运行路径
+
+1. 飞书消息经 OpenClaw Gateway 的 Feishu WebSocket 进入 Agent。
+2. Agent 将腾讯会议工具请求发给本机 stdio MCP `owner_only_bridge.py`。
+3. 入口守卫核对当前 OpenClaw 通道、Agent 和工具边界；随后调用官方腾讯会议 MCP 桥接。
+4. 导出和投递逻辑在 `business_export.py`：从已知归档或官方 MCP 读取材料，依据登记策略生成 Markdown，调用 OpenClaw Feishu 发送并回读核验。
+5. 独立 LaunchAgent 定期启动 `post_meeting_poller.py --once`。轮询器按来源记录和本地开始时间选择候选会议，向腾讯查询明确结束状态，然后检查逐字稿及录播分享链接，按账本控制重试和重复发送。
+
+## 数据与配置分离
+
+- 代码和行为规则：本仓库。
+- OpenClaw 生产配置：`~/.openclaw/openclaw.json`。
+- 助手工作区规则：`~/.openclaw/workspace/AGENTS.md`，由仓库 `prompts/assistant-rules.md` 管理。
+- 会议登记、来源记录、缓存、发送账本、轮询器状态和审计日志：`runtime.local.json` 指向的数据目录。
+- 腾讯/飞书凭据：OpenClaw 本机密钥文件，不纳入仓库。
+- 导出材料：OpenClaw media 目录，不纳入仓库。
+
+## 当前会后策略
+
+本机配置为 live 自动发送。轮询器每 60 秒唤醒一次；每场会议只在本地有可信开始时间时进入结束检查。开始时间 +20 分钟后按 10 分钟间隔查询，只有腾讯返回明确结束状态才进入材料就绪阶段；固定最长等待窗口为 4 小时。确认结束后，逐字稿和录播卡片分别核验与发送，最多尝试至 30 分钟。目标为配置的「AI创业小组」。私人/pending 会议默认不进入自动发送；目前不自动添加录播查看权限。
+
+## 维护规则
+
+- 先修改和审查 Git diff；不把运行数据或本机配置变更混入代码提交。
+- 任何服务路径变更都通过部署脚本生成带时间戳的备份。
+- Gateway 与轮询器分别由 macOS LaunchAgent 管理。应保持 Mac mini 不休眠，并维持用户会话；本机 LaunchAgent 配置为 Aqua 会话。
+- 出现问题时先运行 `scripts/status.sh`，需要暂停会后自动化时使用 `scripts/pause-resume.sh pause`。回滚后再恢复服务。
+
+
+## 权限边界
+
+飞书入口由私聊白名单和固定群白名单约束，群聊要求 @ 助手；入口守卫会在配置边界扩大时拒绝 MCP 调用。它不是完整的逐成员数据访问控制：腾讯会议 MCP 使用本机凭据，stdio 调用本身没有独立的可信成员身份。因此，不应扩大群白名单或把工具开放给新 Agent；历史会议的 private/pending/unknown 仍应按本地登记策略限制，成员级隔离尚不能视为已完成。

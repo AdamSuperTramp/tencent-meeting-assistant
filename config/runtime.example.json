@@ -1,0 +1,13 @@
+{
+  "data_dir": "~/.local/share/tencent-meeting-assistant",
+  "source_archive_dir": "~/path/to/private-meeting-archive",
+  "export_dir": "~/.openclaw/media/tencent-owner-exports",
+  "openclaw_config": "~/.openclaw/openclaw.json",
+  "openclaw_cli": "~/path/to/openclaw/node_modules/.bin/openclaw",
+  "node_bin": "~/.nvm/versions/node/current/bin",
+  "python": "/opt/homebrew/opt/python@3.12/libexec/bin/python3",
+  "owner_open_id": "",
+  "auto_send_group_id": "",
+  "feishu_node_sdk_entry": "~/.openclaw/npm/projects/feishu-plugin/node_modules/@openclaw/feishu/package.json",
+  "secrets_file": "~/.config/openclaw-pending/secrets.json"
+}

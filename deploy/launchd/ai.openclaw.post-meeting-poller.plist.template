@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>ai.openclaw.post-meeting-poller</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>@PROJECT_ROOT@/scripts/run-poller.sh</string></array>
+  <key>WorkingDirectory</key><string>@PROJECT_ROOT@</string>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>60</integer>
+  <key>Nice</key><integer>5</integer>
+  <key>StandardOutPath</key><string>~/Library/Logs/openclaw/post-meeting-poller.launchd.out.log</string>
+  <key>StandardErrorPath</key><string>~/Library/Logs/openclaw/post-meeting-poller.launchd.err.log</string>
+</dict></plist>

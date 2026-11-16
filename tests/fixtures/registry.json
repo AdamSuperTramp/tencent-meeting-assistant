@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "meetings": {
+    "900001": {
+      "mark": "company",
+      "record_file_ids": [
+        "800001"
+      ],
+      "sub_meeting_ids": [
+        "700001"
+      ]
+    },
+    "900002": {
+      "mark": "private",
+      "record_file_ids": [
+        "800002"
+      ],
+      "sub_meeting_ids": []
+    },
+    "900003": {
+      "mark": "pending",
+      "record_file_ids": [
+        "800003"
+      ],
+      "sub_meeting_ids": []
+    }
+  }
+}

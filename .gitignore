@@ -1,0 +1,8 @@
+config/runtime.local.json
+config/*.local.*
+.env
+.env.*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
