@@ -37,7 +37,6 @@ class StartGateTests(unittest.TestCase):
             'backoff_seconds': [60, 300, 900],
             'target_chat_id': 'oc_test',
             'allow_null_created_from_chat': True,
-            'record_acl': {'enabled': False},
         }
         self.prov = {}
         self.registry = {}
@@ -61,8 +60,7 @@ class StartGateTests(unittest.TestCase):
              mock.patch.object(pol, 'load_registry_meetings', return_value=registry if registry is not None else self.registry), \
              mock.patch.object(pol.e, 'load_feishu_created_provenance', return_value={'meetings': prov if prov is not None else self.prov}), \
              mock.patch.object(pol.e, 'mcp_call', mcp or self.mcp), \
-             mock.patch.object(pol, 'log', lambda *a, **k: None), \
-             mock.patch.object(pol.acl, 'acl_cfg_from_export', return_value=self.cfg.get('record_acl') or {}):
+             mock.patch.object(pol, 'log', lambda *a, **k: None):
             return pol.run_once(force_meeting_id=force)
 
     def test_no_meetings_zero_mcp(self):

@@ -190,69 +190,10 @@ class T199UManualReviewCard(unittest.TestCase):
         self.assertNotIn('录播链接', picked['card_text'])
         self.assertNotIn('时长', picked['card_text'])
 
-    def test_auto_ready_uses_shared_card_then_may_fail_acl(self):
-        """With meeting.start_time only, card_text is ready; readiness may still fail later (ACL/state)."""
-        mcp = make_pick_mcp(
-            'Demo', None, None,
-            urls=['https://meeting.tencent.com/crm/Abc123xyz'],
-            meeting_start='2026-11-09T22:29:44+08:00',
-        )
-        with mock.patch.object(e, 'mcp_call', mcp), \
-             mock.patch.object(e, 'is_feishu_assistant_created', return_value=True), \
-             mock.patch.object(e, 'permitted', return_value={'mark': 'company'}), \
-             mock.patch.object(e, 'ensure_and_verify_recording_acl', return_value={'ok': True, 'verified': True}):
-            ready = e.recording_share_ready('123')
-        self.assertTrue(ready.get('ok'))
-        self.assertTrue(ready['card_text'].startswith('回顾: Demo'))
-        self.assertEqual(ready['card_text'], ready['manual_card_text'])
-        self.assertNotIn('录播链接', ready['card_text'])
-
-    def test_auto_dry_run_would_send_three_line_card(self):
-        start = '2026-11-09T22:29:44+08:00'
-        end = '2026-11-09T23:00:00+08:00'
-        expected = (
-            '回顾: AutoKeep\n日期: 2026-11-09 22:29:44\n回顾文件：https://meeting.tencent.com/crm/AutoCrm1'
-        )
-        readiness = {
-            'both_ready': True,
-            'transcript': {'ok': True, 'file_name': '20261109222944-AutoKeep-逐字稿文本.md', 'bytes': 12},
-            'recording': {
-                'ok': True,
-                'card_text': expected,
-                'manual_card_text': expected,
-                'view_address': 'https://meeting.tencent.com/crm/AutoCrm1',
-                'meeting_record_id': '111',
-            },
-            'minutes': {'ok': True, 'skipped': True},
-        }
-        prepared = {'exports': [{'file_name': readiness['transcript']['file_name'], 'export_id': 'exp1'}]}
-        with mock.patch.object(e, 'resolve_poller_target', return_value={'cli_target': 'chat:oc_ai', 'chat_id': 'oc_ai', 'kind': 'group'}), \
-             mock.patch.object(e, 'is_feishu_assistant_created', return_value=True), \
-             mock.patch.object(e, 'load_auto_send_ledger', return_value=(None, 'k', pathlib.Path('/tmp/x.json'))), \
-             mock.patch.object(e, 'send_ready', return_value=readiness), \
-             mock.patch.object(e, 'prepare', return_value=prepared), \
-             mock.patch.object(e, 'poller_send_prepared', return_value={'status': 'dry-run-would-send', 'dry_run': True}), \
-             mock.patch.object(e, 'poller_send_text', return_value={'status': 'dry-run-would-send-text', 'dry_run': True, 'text_preview': expected}) as send_text:
-            out = e.poller_deliver_transcript_and_recording_link('991199002', 'oc_ai', dry_run=True)
-        self.assertTrue(out['dry_run'])
-        self.assertEqual(out['recording_card'], expected)
-        self.assertEqual(out['view_address'], 'https://meeting.tencent.com/crm/AutoCrm1')
-        # ensure the text passed to send is the three-line card
-        args, kwargs = send_text.call_args
-        self.assertEqual(args[2], expected)
-        self.assertNotIn('录播链接', args[2])
-        self.assertNotIn('时长', args[2])
-        # no minutes auto-send in this path
-        kinds = [w.get('kind') for w in out.get('would_send') or []]
-        self.assertIn('transcript', kinds)
-        self.assertIn('recording_link', kinds)
-        self.assertNotIn('minutes', kinds)
-
     def test_pause_state_untouched(self):
         cfg = json.loads((pathlib.Path.home()/'.openclaw/automations/post-meeting-export.json').read_text())
         self.assertFalse(cfg.get('enabled'))
         self.assertFalse(cfg.get('send_enabled'))
-        self.assertFalse((cfg.get('record_acl') or {}).get('enabled'))
         self.assertTrue((pathlib.Path.home()/'.openclaw/automations/post-meeting-poller.PAUSED').exists())
 
 

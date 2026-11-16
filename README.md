@@ -33,7 +33,7 @@ flowchart LR
 - `prompts/assistant-rules.md`：OpenClaw 工作区行为规则的源文件，部署时与运行工作区保持同一份。
 - `config/runtime.example.json`：路径配置示例。
 - `config/runtime.local.json`：本机路径、内部 ID 等设置；不纳入 Git。
-- `deploy/launchd/`：轮询器 LaunchAgent 模板。
+- `scripts/deploy.sh`：生成轮询器 LaunchAgent 配置并部署。
 - `scripts/`：状态检查、部署、暂停/恢复入口。
 
 会议数据、密钥、OpenClaw 配置、投递账本和日志不属于仓库，路径由本机 `config/runtime.local.json` 管理。首次在新机器部署前，先按示例建立本机配置并确认数据目录和服务身份。

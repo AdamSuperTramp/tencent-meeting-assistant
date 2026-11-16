@@ -29,7 +29,6 @@ TEST_EXPORTS.mkdir()
 }))
 (TEST_HOME / '.openclaw/automations/post-meeting-export.json').write_text(json.dumps({
     'enabled': False, 'send_enabled': False, 'mode': 'dry-run', 'target_chat_id': 'oc_fixture',
-    'record_acl': {'enabled': False},
 }))
 (TEST_HOME / '.openclaw/automations/post-meeting-poller.PAUSED').touch()
 (TEST_HOME / '.config/secrets.json').write_text('{}')

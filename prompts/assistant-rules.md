@@ -69,7 +69,7 @@
 - **投递目标（硬规则）**：
   - **群聊入站**（Conversation info 含 `is_group_chat:true` / `chat_id` 为 `chat:oc_…`）：调用 `deliver_meeting_markdown` 时 **必须** 传入 `target_chat_id`=该 `chat_id`（`chat:oc_…` 或 `oc_…`）。文件必须出现在**同一个群**，禁止发到私聊/open_id。
   - **私聊入站**：省略 `target_chat_id`，文件发回该私聊。
-- **每次请求都必须重新调用** `deliver_meeting_markdown` 强制重新上传发送；不论该文档以前是否发过。禁止用旧 receipt、禁止以“已经发过/往上翻看看”代替重发。
+- **每条新的入站消息都必须调用** `deliver_meeting_markdown` 交付，同一消息重试使用已核验收据；不论该文档以前是否发过。禁止用旧 receipt、禁止以“已经发过/往上翻看看”代替重发。
 - 通过 tool_search 搜索 `deliver_meeting_markdown`，加载真实 schema 后 dispatch_action。id=`mcp:tencent-meeting:tencent-meeting__deliver_meeting_markdown`。先 `search_records` 定位 meeting_id（最近=实际 meeting_start_time 最新已结束会议），kind=transcript/minutes/both；群聊补上 `target_chat_id`。
 - 成功仅当结果本轮 `verified` 且 status=`file-message-readback-verified`、file_name 为当前原生命名（含新的 message_id/file_key）；群聊成功时结果里 `delivery_kind=group` 且 `chat_id` 为该群。
 - **成功后必须只输出 `NO_REPLY`（或完全空）**：禁止「已发送/已经发过/往上翻」、禁止任何中英文配文（含 “The tool run finished…” / “no final summary”）、禁止「正在导出」、禁止本地路径、禁止贴全文。群聊与私聊同一规则。
@@ -98,7 +98,7 @@
 - 可用 `get_minutes` / `record_content` / `search_records` 查询；交付附件走上一节工具，不走正文。
 
 ## 会后自动化（LaunchAgent poller，Mini）
-- 飞书助手创建的 company 会结束后：等待**逐字稿就绪 + 稳定录播分享链接就绪（优先真实 crm，否则真实 crw）**，自动向 AI创业小组发送：逐字稿原生 Markdown 附件 + **与「问录像」相同的三行录播卡片纯文本**（`回顾:` / `日期:` / `回顾文件：`；无时长、不附纪要 MD）。
+- 飞书助手创建的 company 会结束后：逐字稿和稳定录播分享链接（优先真实 crm，否则真实 crw）各自就绪后，分别自动向 AI创业小组发送：逐字稿原生 Markdown 附件 + **与「问录像」相同的三行录播卡片纯文本**（`回顾:` / `日期:` / `回顾文件：`；无时长、不附纪要 MD）。
 - **不再自动发送纪要 Markdown**；用户手动要纪要仍走 `deliver_meeting_markdown` kind=minutes。
 - 私人/pending 默认排除；仅允许白名单群；旧已 dual-MD 自动发送的历史会不因新格式重发。
 

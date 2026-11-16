@@ -18,7 +18,6 @@ sys.path.insert(0, str(CODE_DIR))
 
 import business_export as e  # noqa: E402
 import brain_delivery
-import record_acl_grant as acl  # noqa: E402
 
 TZ = datetime.timezone(datetime.timedelta(hours=8))
 CONFIG_PATH = OPENCLAW_AUTOMATION_CONFIG
@@ -236,7 +235,7 @@ def schedule_b_after_attempt(cand, cfg):
     return slots[0] - elapsed
 
 
-def collect_known_company_mids(prov, registry, state, ra_cfg):
+def collect_known_company_mids(prov, registry, state):
     """Known company meeting ids from local files only (no MCP discovery)."""
     mids = set()
     for mid, p in (prov or {}).items():
@@ -247,9 +246,6 @@ def collect_known_company_mids(prov, registry, state, ra_cfg):
     for mid, reg in (registry or {}).items():
         if (reg or {}).get('mark') == 'company':
             mids.add(str(mid))
-    for wid in (ra_cfg.get('watch_meeting_ids') or []):
-        if wid:
-            mids.add(str(wid))
     for mid, cand in (state.get('candidates') or {}).items():
         # Already-tracked candidates remain known (may lack start_time but have ended_at).
         if cand:
@@ -279,36 +275,6 @@ def eligible_for_auto_send(mid, prov_entry, cfg):
     return False, 'created_from_other_chat:' + str(chat)
 
 
-def fetch_ended_meetings(lookback_hours):
-    """Paginate get_user_ended_meetings; keep those ending within lookback (or missing end still listed)."""
-    cutoff = now_sh() - datetime.timedelta(hours=lookback_hours)
-    seen = {}
-    token = None
-    pages = 0
-    while pages < 10:
-        args = {'page_size': 20}
-        if token:
-            args['page_token'] = token
-        out = e.mcp_call('get_user_ended_meetings', args)
-        pages += 1
-        for m in out.get('meeting_info_list') or []:
-            mid = str(m.get('meeting_id') or '')
-            if mid:
-                seen[mid] = m
-        if not out.get('has_more'):
-            break
-        token = out.get('next_page_token')
-        if not token:
-            break
-    # Filter by end_time when present
-    recent = {}
-    for mid, m in seen.items():
-        end = parse_dt(m.get('end_time'))
-        if end is None or end >= cutoff:
-            recent[mid] = m
-    return recent, pages
-
-
 def candidate_record(state, mid):
     c = state['candidates'].setdefault(mid, {
         'meeting_id': mid,
@@ -323,23 +289,6 @@ def candidate_record(state, mid):
     return c
 
 
-def schedule_backoff(cand, cfg):
-    seq = list(cfg.get('backoff_seconds') or BACKOFF_SECONDS)
-    idx = int(cand.get('backoff_index') or 0)
-    delay = seq[min(idx, len(seq) - 1)]
-    cand['backoff_index'] = min(idx + 1, len(seq) - 1)
-    cand['next_check_at'] = iso(now_sh() + datetime.timedelta(seconds=delay))
-    return delay
-
-
-def timed_out(cand, ended_meta, cfg):
-    end = parse_dt(cand.get('ended_at')) or parse_dt((ended_meta or {}).get('end_time'))
-    if not end:
-        return False
-    return now_sh() > end + datetime.timedelta(hours=float(cfg.get('timeout_hours_after_end') or TIMEOUT_HOURS))
-
-
-
 def load_registry_meetings():
     path = BASE / 'registry.json'
     if not path.exists():
@@ -350,100 +299,18 @@ def load_registry_meetings():
         return {}
 
 
-def eligible_for_record_acl(mid, ended_meta, feishu_entry, registry_entry, cfg):
-    """Company feishu-created OR registry company; never private/pending; end >= cutoff."""
-    ra = acl.acl_cfg_from_export(cfg)
-    if not ra.get('enabled'):
-        return False, 'acl_disabled'
-    if str(mid) in set(str(x) for x in (ra.get('deny_meeting_ids') or [])):
-        return False, 'deny_list'
-    ok, why = acl.is_company_for_acl(mid, feishu_entry, registry_entry)
-    if not ok:
-        return False, why
-    ok2, why2 = acl.after_cutoff(ended_meta, ra.get('cutoff') or acl.DEFAULT_CUTOFF)
-    if not ok2:
-        return False, why2
-    return True, 'eligible:' + why + '+' + why2
-
-
-def run_record_acl_for_meeting(mid, ended_meta, feishu_entry, registry_entry, cfg, state, force=False):
-    cand = candidate_record(state, mid)
-    if ended_meta and ended_meta.get('end_time'):
-        cand['ended_at'] = ended_meta.get('end_time')
-    if ended_meta and ended_meta.get('subject'):
-        cand['subject'] = ended_meta.get('subject')
-    elif feishu_entry and feishu_entry.get('subject'):
-        cand.setdefault('subject', feishu_entry.get('subject'))
-
-    ok, why = eligible_for_record_acl(mid, ended_meta or {'end_time': cand.get('ended_at')}, feishu_entry, registry_entry, cfg)
-    if not ok:
-        # Still record skip reason once (do not fake verified)
-        if (cand.get('record_acl') or {}).get('status') != why:
-            fake = {'meeting_id': mid, 'action': 'skip_before_cutoff' if 'cutoff' in why else ('skip_not_company' if 'company' in why or 'private' in why or 'pending' in why else why), 'why': why}
-            if why == 'acl_disabled':
-                fake['action'] = 'disabled'
-            elif why == 'deny_list':
-                fake['action'] = 'denied_list'
-            elif why.startswith('eligible'):
-                pass
-            else:
-                if 'cutoff' in why:
-                    fake['action'] = 'skip_before_cutoff'
-                elif why in ('registry_private', 'registry_pending', 'not_company', 'feishu_prov_not_company', 'probe_entry'):
-                    fake['action'] = 'skip_not_company'
-            acl.merge_acl_state(cand, fake)
-        return {'meeting_id': mid, 'action': 'acl_skip', 'why': why}
-
-    if not force and not acl.due_for_acl_check(cand):
-        return {'meeting_id': mid, 'action': 'acl_wait', 'next_acl_check_at': (cand.get('record_acl') or {}).get('next_acl_check_at')}
-
-    dry = (
-        os.environ.get('RECORD_ACL_FORCE_DRY') == '1'
-        or os.environ.get('POST_MEETING_POLLER_FORCE_DRY') == '1'
-        or bool((cfg.get('record_acl') or {}).get('dry_run'))
-    )
-    # Live ACL writes require record_acl.enabled; dry_run still computes diffs.
-    try:
-        result = acl.ensure_meeting_acl(
-            e.mcp_call,
-            mid,
-            ended_meta=ended_meta or {'end_time': cand.get('ended_at'), 'subject': cand.get('subject')},
-            feishu_prov_entry=feishu_entry,
-            registry_entry=registry_entry,
-            cfg=cfg,
-            dry_run=dry,
-        )
-    except Exception as ex:
-        result = {
-            'meeting_id': mid,
-            'action': 'acl_error',
-            'verified': False,
-            'why': type(ex).__name__ + ': ' + str(ex)[:400],
-        }
-        cand.setdefault('record_acl', {})
-        cand['record_acl']['status'] = 'needs_retry'
-        cand['record_acl']['last_error'] = result['why']
-        cand['record_acl']['next_acl_check_at'] = iso(now_sh() + datetime.timedelta(minutes=5))
-        cand['record_acl']['updated_at'] = iso()
-        log('record_acl_error', meeting_id=mid, error=result['why'])
-        return {'meeting_id': mid, 'action': 'acl_error', 'error': result['why']}
-
-    acl.merge_acl_state(cand, result)
-    log('record_acl', meeting_id=mid, acl_action=result.get('action'), verified=result.get('verified'),
-        records_found=result.get('records_found'), dry_run=result.get('dry_run'),
-        would_modify=result.get('would_modify'), wanted=result.get('wanted_names'))
-    return {'meeting_id': mid, 'action': 'acl_' + str(result.get('action')), 'result': {
-        k: result.get(k) for k in (
-            'action', 'verified', 'why', 'records_found', 'wanted_names', 'pending_members',
-            'records', 'dry_run', 'would_modify', 'subject'
-        ) if k in result
-    }}
-
-
-
-
 def process_candidate(mid, ended_meta, prov, cfg, state, force=False):
     cand = candidate_record(state, mid)
+    # 历史双附件均已送达的会议视为完成，不因改版补发录播。
+    if cand.get('status') not in TERMINAL_STATUSES:
+        old_transcript, _, _ = e.load_auto_send_ledger(mid, 'transcript', cfg['target_chat_id'])
+        old_minutes, _, _ = e.load_auto_send_ledger(mid, 'minutes', cfg['target_chat_id'])
+        if all((item or {}).get('result', {}).get('status') == 'file-message-readback-verified'
+               for item in (old_transcript, old_minutes)):
+            cand['status'] = 'auto_sent'
+            cand['next_check_at'] = None
+            atomic_state_write(state)
+            return {'meeting_id': mid, 'action': 'legacy_auto_sent'}
     # Force flags cannot reopen completed/sealed historical candidates.
     if cand.get('status') in TERMINAL_STATUSES:
         return {'meeting_id': mid, 'action': 'terminal_skip'}
@@ -547,11 +414,35 @@ def deliver_ready_brain_transcripts(cfg, state, prov, registry):
         before = job.get('status'), job.get('retry_at')
         if target not in e.allowed_group_chat_ids():
             return
-        brain_delivery.deliver(mid, payload['export_id'], job, lambda: atomic_state_write(state))
+        def save_job():
+            with (BASE / 'poller-state' / 'poller.run.lock').open('a') as state_lock:
+                fcntl.flock(state_lock, fcntl.LOCK_EX)
+                latest = load_state()
+                latest.setdefault('candidates', {}).setdefault(mid, {})['brain_delivery'] = dict(job)
+                atomic_state_write(latest)
+        brain_delivery.deliver(mid, payload['export_id'], job, save_job)
         if before != (job.get('status'), job.get('retry_at')):
             log('brain_delivery', meeting_id=mid, status=job.get('status'), reason=job.get('reason'))
             # 每轮最多处理一场，给下一次飞书轮询留出时间。
             return
+
+
+
+def run_brain_delivery():
+    folder = BASE / 'poller-state'
+    folder.mkdir(parents=True, exist_ok=True)
+    with (folder / 'brain.run.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        with (folder / 'poller.run.lock').open('a') as state_lock:
+            fcntl.flock(state_lock, fcntl.LOCK_EX)
+            cfg, _ = load_config()
+            state = load_state()
+            prov = e.load_feishu_created_provenance().get('meetings') or {}
+            registry = load_registry_meetings()
+        deliver_ready_brain_transcripts(cfg, state, prov, registry)
 
 
 def run_once(force_meeting_id=None, force_send=False):
@@ -569,8 +460,7 @@ def run_once(force_meeting_id=None, force_send=False):
         state = load_state()
         prov = e.load_feishu_created_provenance().get('meetings') or {}
         registry = load_registry_meetings()
-        ra_cfg = acl.acl_cfg_from_export(cfg)
-        known = collect_known_company_mids(prov, registry, state, ra_cfg)
+        known = collect_known_company_mids(prov, registry, state)
         if force_meeting_id:
             known.add(str(force_meeting_id))
 
@@ -654,7 +544,7 @@ def run_once(force_meeting_id=None, force_send=False):
             blockers_no_start=len(blockers_no_start), too_early=len(too_early),
             a_gave_up=len(a_gave_up), cancelled_skip=len(cancelled_skip),
             provenance=len(prov), force_meeting_id=force_meeting_id,
-            record_acl_merged_into_b=True)
+            independent_components=True)
         if blockers_no_start:
             log('a_gate_block_no_start', meeting_ids=blockers_no_start[:50], n=len(blockers_no_start))
 
@@ -712,7 +602,6 @@ def run_once(force_meeting_id=None, force_send=False):
             ended[mid]['_a_confirmed_at'] = confirmed
             results.append({'meeting_id': mid, 'action': 'a_ended', 'why': why, 'b_first_at': c.get('next_check_at')})
 
-        # No standalone ACL phase (t195u): ACL only inside B send_ready on ready records.
 
         # Judgment B for confirmed ended ∩ feishu send-eligible
         mids = set()
@@ -748,8 +637,6 @@ def run_once(force_meeting_id=None, force_send=False):
             force = bool(force_meeting_id and mid == str(force_meeting_id))
             results.append(process_candidate(mid, meta, p, cfg, state, force=force))
 
-        if not force_meeting_id and not force_send:
-            deliver_ready_brain_transcripts(cfg, state, prov, registry)
 
         state['updated_at'] = iso()
         state['last_cycle'] = {
@@ -785,14 +672,7 @@ def main():
     ap.add_argument('--force-meeting-id', default=None)
     ap.add_argument('--force-send', action='store_true', help='Override config to live-send for this run')
     ap.add_argument('--self-check', action='store_true', help='Dry-run readiness for eligible ended meetings')
-    ap.add_argument('--acl-self-check', action='store_true', help='Dry-run record ACL only (no writes, no sends)')
     args = ap.parse_args()
-    if args.acl_self_check:
-        os.environ['RECORD_ACL_FORCE_DRY'] = '1'
-        os.environ['POST_MEETING_POLLER_FORCE_DRY'] = '1'
-        out = run_once(force_meeting_id=args.force_meeting_id, force_send=False)
-        print(json.dumps(out, ensure_ascii=False, indent=2))
-        return
     if args.self_check:
         os.environ['POST_MEETING_POLLER_FORCE_DRY'] = '1'
         out = run_once(force_meeting_id=args.force_meeting_id, force_send=False)
@@ -800,6 +680,8 @@ def main():
         return
     if args.once or args.force_meeting_id:
         out = run_once(force_meeting_id=args.force_meeting_id, force_send=args.force_send)
+        if not args.force_meeting_id and not args.force_send:
+            run_brain_delivery()
         print(json.dumps(out, ensure_ascii=False, indent=2))
         return
     ap.error('Use --once or --self-check')

@@ -102,7 +102,7 @@ def new_chat(source, token):
 
 
 def deliver(mid, export_id, job, save):
-    """轮询锁内运行。外部写入前持久化，未收到确定回执时不重发。"""
+    """外部写入前持久化，未收到确定回执时不重发。"""
     if job.get("status") in ("accepted", "uncertain", "uploading", "opening"):
         return
     if job.get("retry_at", 0) > time.time():

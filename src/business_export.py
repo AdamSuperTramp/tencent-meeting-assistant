@@ -1,7 +1,7 @@
 """Fixed-source/fixed-recipient export tools for exclusive-owner gateway only.
 Not a team identity adapter; no arbitrary paths, receivers or actor claims accepted.
 """
-import pathlib,json,os,re,hashlib,zipfile,html,subprocess,datetime,tempfile
+import pathlib,json,os,re,hashlib,subprocess,datetime,tempfile
 from settings import CODE_DIR, DATA_DIR, SOURCE_ARCHIVE_DIR, EXPORT_DIR, OWNER_OPEN_ID, OPENCLAW_CLI, NODE_BIN, OPENCLAW_CONFIG, OPENCLAW_AUTOMATION_CONFIG, SECRETS_FILE, AUTO_SEND_GROUP_ID
 BASE=DATA_DIR
 SOURCE=SOURCE_ARCHIVE_DIR
@@ -388,13 +388,6 @@ def source_blob_path(fid,kind,origin=None):
  if arch.exists() and not arch.is_symlink():return arch
  raise PermissionError('Source blob missing')
 
-def docx_write(path,text):
- with zipfile.ZipFile(path,'w',zipfile.ZIP_DEFLATED) as z:
-  z.writestr('[Content_Types].xml','<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
-  z.writestr('_rels/.rels','<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')
-  body=''.join('<w:p><w:r><w:t xml:space="preserve">'+html.escape(t)+'</w:t></w:r></w:p>' for t in text.splitlines())
-  z.writestr('word/document.xml','<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'+body+'<w:sectPr/></w:body></w:document>')
-
 def safe_filename(name):
  if not isinstance(name,str):raise ValueError('Missing API filename')
  name=re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]', '_', name).strip().strip('.')
@@ -452,18 +445,17 @@ def prepare(args):
  manifests=BASE/'exports';manifests.mkdir(exist_ok=True,mode=0o700);results=[]
  for k in ['minutes','transcript'] if kind=='both' else [kind]:
   text,sources=source_text(mid,k)
-  for f in [fmt]:
-   eid=hashlib.sha256((mid+k+f+text).encode()).hexdigest()[:24]
-   name,naming=native_name(mid,k,sources)
-   folder=OUT/eid
-   if folder.is_symlink():raise PermissionError('Symlink folder forbidden')
-   folder.mkdir(exist_ok=True,mode=0o700);p=folder/name
-   if p.is_symlink():raise PermissionError('Symlink export forbidden')
-   if f=='md':atomic_text(p,text)
-   else:docx_write(p,text)
-   p.chmod(0o600)
-   m={'export_id':eid,'meeting_id':mid,'kind':k,'format':f,'file_name':p.name,'naming':naming,'naming_version':2,'sha256':digest(p),'source':sources,'recipient':OWNER,'registry_version':load(BASE/'registry.json')['version']}
-   atomic_json(manifests/(eid+'.json'),m);results.append({'export_id':eid,'kind':k,'format':f,'file_name':p.name,'bytes':p.stat().st_size,'sent':False})
+  f=fmt
+  eid=hashlib.sha256((mid+k+f+text).encode()).hexdigest()[:24]
+  name,naming=native_name(mid,k,sources)
+  folder=OUT/eid
+  if folder.is_symlink():raise PermissionError('Symlink folder forbidden')
+  folder.mkdir(exist_ok=True,mode=0o700);p=folder/name
+  if p.is_symlink():raise PermissionError('Symlink export forbidden')
+  atomic_text(p,text)
+  p.chmod(0o600)
+  m={'export_id':eid,'meeting_id':mid,'kind':k,'format':f,'file_name':p.name,'naming':naming,'naming_version':2,'sha256':digest(p),'source':sources,'recipient':OWNER,'registry_version':load(BASE/'registry.json')['version']}
+  atomic_json(manifests/(eid+'.json'),m);results.append({'export_id':eid,'kind':k,'format':f,'file_name':p.name,'bytes':p.stat().st_size,'sent':False})
  return {'exports':results,'recipient':'fixed-owner-only','prepared_not_sent':True}
 
 def atomic_text(path,text):
@@ -707,7 +699,7 @@ def deliver_recording_link(args):
  kind='manual_recording_link'
  # Manual asks re-send each inbound message; use request messageId in ledger key when present
  ctx=REQUEST_CONTEXT.get() or {}
- req=str(ctx.get('messageId') or 'no-msg')
+ _,req=delivery_request_identity()
  # separate ledger namespace under auto-send-ledger with hashed key including request id
  key=hashlib.sha256(json.dumps([POLLER_IDENTITY,'manual-recording-link', mid, dest.get('chat_id') or dest.get('cli_target'), req], separators=(',',':')).encode()).hexdigest()
  AUTO_SEND_LEDGER.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -719,6 +711,20 @@ def deliver_recording_link(args):
   if old and (old.get('result') or {}).get('status')=='text-message-readback-verified':
    # same inbound message retry: idempotent replay, still success for NO_REPLY
    return {'verified':True,'idempotent_replay':True,'card_text':card,'view_address':url,'url_kind':picked.get('url_kind'),'date_source':picked.get('date_source'),'manual_date':picked.get('manual_date'),'delivery_kind':dest['kind'],'chat_id':dest.get('chat_id'),'message_id':(old.get('result') or {}).get('message_id'),'status':'text-message-readback-verified','reply_instruction':'NO_REPLY'}
+  if old:
+   result=old.get('result') or {}
+   msg_id=result.get('message_id')
+   sent_url=result.get('view_address')
+   if not msg_id or not sent_url:
+    raise RuntimeError('录播发送结果待核对，禁止重复发送')
+   rb=read_feishu_message(msg_id)
+   if not _text_readback_ok(rb,sent_url,dest):
+    raise RuntimeError('录播发送结果待核对，禁止重复发送')
+   result.update(status='text-message-readback-verified',chat_id=rb.get('chat_id'),msg_type=rb.get('msg_type'))
+   atomic_json(ledger,dict(old,phase=result['status'],result=result))
+   return {'verified':True,'idempotent_replay':True,'delivery_kind':dest['kind'],'chat_id':dest.get('chat_id'),'message_id':msg_id,'status':result['status'],'reply_instruction':'NO_REPLY'}
+  identity={'identity':POLLER_IDENTITY,'kind':kind,'meeting_id':mid,'target':dest['cli_target'],'card_text':card}
+  atomic_json(ledger,dict(identity,phase='reserved',result={}))
   env=os.environ.copy()
   proc=subprocess.run([CLI,'message','send','--channel','feishu','--target',dest['cli_target'],'--message',card,'--json'],capture_output=True,text=True,env=env,timeout=90)
   if proc.returncode!=0:
@@ -739,6 +745,7 @@ def deliver_recording_link(args):
   msg_id=find_id(payload)
   if not msg_id:
    raise RuntimeError('录播链接发送失败：无 message_id')
+  atomic_json(ledger,dict(identity,phase='sent-unverified',result={'message_id':msg_id,'view_address':url}))
   rb=read_feishu_message(msg_id)
   ok=_text_readback_ok(rb, url, dest)
   if dest['kind']=='group':
@@ -761,28 +768,6 @@ def resolve_poller_target(target_chat_id):
  if not chat:raise PermissionError('Poller requires allowlisted oc_* group target')
  if chat not in allowed_group_chat_ids():raise PermissionError('Poller target group not allowlisted')
  return {'cli_target':'chat:'+chat,'chat_id':chat,'kind':'group','source':'post-meeting-poller'}
-
-def material_ready(meeting_id, kind):
- """Return {ok, file_name?, error?, bytes?} without sending. Live MCP preferred."""
- mid=str(meeting_id)
- try:
-  if not is_feishu_assistant_created(mid) and FEISHU_CREATED_REASON not in str((load(BASE/'registry.json').get('meetings') or {}).get(mid,{}).get('reason') or ''):
-   return {'ok':False,'kind':kind,'error':'not_feishu_assistant_created'}
-  entry=ensure_registered(mid)
-  if entry.get('mark')!='company':
-   return {'ok':False,'kind':kind,'error':'not_company'}
-  text,sources=source_text(mid,kind)
-  if not text or not text.strip():
-   return {'ok':False,'kind':kind,'error':'empty_text'}
-  name,naming=native_name(mid,kind,sources)
-  return {'ok':True,'kind':kind,'file_name':name,'bytes':len(text.encode('utf-8')),'sources':len(sources)}
- except Exception as ex:
-  return {'ok':False,'kind':kind,'error':type(ex).__name__+': '+str(ex)[:400]}
-
-def dual_ready(meeting_id):
- t=material_ready(meeting_id,'transcript')
- m=material_ready(meeting_id,'minutes')
- return {'transcript':t,'minutes':m,'both_ready':bool(t.get('ok') and m.get('ok'))}
 
 def load_auto_send_ledger(meeting_id, kind, target_chat_id):
  AUTO_SEND_LEDGER.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -923,160 +908,6 @@ def parse_iso_dt(value):
  return dt.astimezone(datetime.timezone(datetime.timedelta(hours=8)))
 
 
-def load_record_acl_wanted():
- import record_acl_grant as acl
- cfg_path=OPENCLAW_AUTOMATION_CONFIG
- cfg=load(cfg_path) if cfg_path.exists() else {}
- ra=cfg.get('record_acl') or {}
- members_path=ra.get('members_config') or str(BASE/'record-acl-members.json')
- doc=acl.load_members_config(members_path)
- wanted=acl.active_member_targets(doc)
- perm=int(ra.get('permission') if ra.get('permission') is not None else 1)
- for w in wanted:
-  w['permission']=perm
- return wanted, ra
-
-
-def verify_record_acl_members(meeting_record_id, wanted=None):
- """Readback via access_members. Success = all wanted present (可查看 accepted; API often ignores permission=1)."""
- import record_acl_grant as acl
- if wanted is None:
-  wanted,_=load_record_acl_wanted()
- body=acl.fetch_all_members(lambda name,args: acl.audited_mcp(mcp_call,name,args), str(meeting_record_id))
- idx=acl.members_index(body)
- present=[]; missing=[]
- for w in wanted:
-  ex=idx.get(w['open_id'])
-  if ex and ex.get('permission') is not None and ex['permission'] >= 0:
-   raw=((ex.get('raw') or {}).get('permission') if isinstance(ex.get('raw'),dict) else None)
-   present.append({'display_name':w['display_name'],'permission':raw if raw is not None else ex.get('permission')})
-  else:
-   missing.append(w['display_name'])
- return {
-  'ok': len(missing)==0 and len(wanted)>0 and acl.members_evidence_complete(body),
-  'members_complete': acl.members_evidence_complete(body),
-  'present': present,
-  'missing': missing,
-  'total_count': body.get('total_count'),
-  'meeting_record_id': str(meeting_record_id),
- }
-
-
-def ensure_and_verify_recording_acl(meeting_id, meeting_record_ids, *, acl_cache=None, accept_view=True):
- """Grant+verify ready records when record_acl.enabled. Disabled t283u (user set meetings world-viewable).
- Not a send gate (t279u). If accept_view: do not re-add for manage-upgrade when already present.
- acl_cache may carry verified_record_ids to skip repeat writes within B window. Mutates cache."""
- import record_acl_grant as acl
- wanted, ra = load_record_acl_wanted()
- if not ra.get('enabled'):
-  return {'ok':False,'skipped':'acl_disabled','records':[],'wanted_names':[w.get('display_name') for w in wanted],'acl_cache': acl_cache if isinstance(acl_cache, dict) else {}}
- if not wanted:
-  return {'ok':False,'error':'no_active_acl_members','records':[]}
- cache = acl_cache if isinstance(acl_cache, dict) else {}
- verified = set(str(x) for x in (cache.get('verified_record_ids') or []))
- req_perm = int(ra.get('permission') if ra.get('permission') is not None else 1)
- results=[]
- all_ok=True
- degraded_any=False
- for mrid in meeting_record_ids:
-  mrid=str(mrid)
-  if mrid in verified:
-   results.append({'meeting_record_id':mrid,'ok':True,'cached':True,'grant_action':'cache_hit'})
-   continue
-  # Presence-first: only add missing members; never infinite manage-upgrade writes.
-  body=acl.fetch_all_members(lambda name,args: acl.audited_mcp(mcp_call,name,args), mrid)
-  if not acl.members_evidence_complete(body):
-   all_ok=False
-   results.append({'meeting_record_id':mrid,'ok':False,'grant_action':'members_incomplete',
-                   'members_ok':False,'missing':[w['display_name'] for w in wanted]})
-   continue
-  idx=acl.members_index(body)
-  to_add=[]
-  degraded=[]
-  for w in wanted:
-   oid=w['open_id']
-   ex=idx.get(oid)
-   if not ex:
-    to_add.append({'open_id':oid,'permission':req_perm,'display_name':w.get('display_name')})
-    continue
-   have=ex.get('permission')
-   if have is not None and req_perm > 0 and have < req_perm:
-    degraded.append({'display_name':w.get('display_name'),'have':have,'requested':req_perm})
-    degraded_any=True
-    # accept_view: do not re-add for upgrade
-  grant_action='noop_present'
-  write_status=None
-  if to_add:
-   share_patch={}
-   if ra.get('enable_download', True):
-    share_patch['download_enable']=True
-   if ra.get('ensure_view_minutes', True):
-    share_patch['view_minutes_enable']=True
-   args={'meeting_record_id':mrid,'add_members':[{'open_id':x['open_id'],'permission':int(x['permission'])} for x in to_add]}
-   if share_patch and ra.get('preserve_sharing_mode', True):
-    args['sharing_config']=share_patch
-   try:
-    response=acl.audited_mcp(mcp_call, 'record_share_set', args)
-    write_status=acl.inspect_share_result(response,args,wanted)
-    grant_action='add_members'
-   except Exception as ex:
-    grant_action='add_error:'+type(ex).__name__
-    write_status={'ok':False,'errors':[type(ex).__name__],'failed_names':[]}
-  elif ra.get('enable_download', True) or ra.get('ensure_view_minutes', True):
-   # members present; still ensure switches without member churn
-   share_patch={}
-   if ra.get('enable_download', True): share_patch['download_enable']=True
-   if ra.get('ensure_view_minutes', True): share_patch['view_minutes_enable']=True
-   if share_patch:
-    try:
-     args={'meeting_record_id':mrid,'sharing_config':share_patch}
-     response=acl.audited_mcp(mcp_call, 'record_share_set', args)
-     write_status=acl.inspect_share_result(response,args,wanted)
-     grant_action='share_patch_only'
-    except Exception as ex:
-     grant_action='share_patch_error:'+type(ex).__name__
-     write_status={'ok':False,'errors':[type(ex).__name__],'failed_names':[]}
-  if write_status is not None and not write_status['ok']:
-   all_ok=False
-   results.append({'meeting_record_id':mrid,'ok':False,'grant_action':grant_action,
-                   'members_ok':False,'missing':[w['display_name'] for w in wanted if w['open_id'] not in idx],
-                   'failed_names':write_status.get('failed_names',[]),'write_status':write_status})
-   break
-  ver=verify_record_acl_members(mrid, wanted)
-  if not ver.get('members_complete',False):
-   all_ok=False
-   results.append({'meeting_record_id':mrid,'ok':False,'grant_action':grant_action,
-                   'members_ok':False,'missing':ver['missing'],'write_status':write_status})
-   break
-  sharing=acl.audited_mcp(mcp_call,'record_access',{'action':'sharing','meeting_record_id':mrid}) or {}
-  cur=acl.sharing_current(sharing)
-  if ra.get('enable_download', True):
-   switches_ok=bool(cur.get('download_enable') in (True,1,'true','True')) and bool(cur.get('view_minutes_enable') in (True,1,'true','True'))
-  else:
-   switches_ok=bool(cur.get('view_minutes_enable') in (True,1,'true','True') or not ra.get('ensure_view_minutes', True))
-  ok=bool(ver['ok'] and switches_ok and not acl.response_errors(sharing))
-  if not ok: all_ok=False
-  if ok:
-   verified.add(mrid)
-  results.append({
-   'meeting_record_id': mrid,
-   'grant_action': grant_action,
-   'members_ok': ver['ok'],
-   'write_status': write_status,
-   'missing': ver['missing'],
-   'present_names': [p['display_name'] for p in ver['present']],
-   'permission_values': sorted({str(p.get('permission')) for p in ver['present']}),
-   'permission_requested': req_perm,
-   'permission_degraded': degraded,
-   'sharing': {k:cur.get(k) for k in ('download_enable','view_minutes_enable','permission_point_id','switch_state')},
-   'ok': ok,
-  })
- cache['verified_record_ids']=sorted(verified)
- if degraded_any:
-  cache['permission_degraded']=True
- return {'ok': all_ok, 'wanted_names':[w['display_name'] for w in wanted], 'records': results, 'permission_degraded': degraded_any, 'acl_cache': cache}
-
-
 def pick_cloud_recording_for_share(meeting_id):
  """Prefer cloud video; share URL prefers real crm then real crw (never rewrite). Times from search_records."""
  mid=str(meeting_id)
@@ -1182,10 +1013,8 @@ def pick_cloud_recording_for_share(meeting_id):
  return out
 
 
-def recording_share_ready(meeting_id, acl_cache=None):
- """Stable recording share URL/card on records already ready (not 录制中/转码中).
- Five-person ACL grant is skipped when record_acl.enabled is false (t283u).
- A failed grant/verify must not block ready/send (t279u). Optional acl_cache for B window."""
+def recording_share_ready(meeting_id):
+ """检查录播链接与转码状态。"""
  mid=str(meeting_id)
  try:
   if not is_feishu_assistant_created(mid) and FEISHU_CREATED_REASON not in str((load(BASE/'registry.json').get('meetings') or {}).get(mid,{}).get('reason') or ''):
@@ -1216,30 +1045,9 @@ def recording_share_ready(meeting_id, acl_cache=None):
    return {'ok':False,'error':'records_not_ready','waiting':waiting,'picked':{k:picked.get(k) for k in ('view_address','meeting_record_id')}}
   if picked['meeting_record_id'] not in ready_ids:
    return {'ok':False,'error':'share_target_not_ready','waiting':waiting,'meeting_record_id':picked['meeting_record_id']}
-  # t283u: skip five-person grant/verify when ACL is disabled (no MCP writes).
-  # t279u: if still enabled, grant is best-effort and must not block auto-send.
-  _, ra = load_record_acl_wanted()
-  if not ra.get('enabled'):
-   return {'ok':True, **picked, 'acl':{'ok':False,'skipped':'acl_disabled'}, 'waiting':waiting, 'acl_skipped':True}
-  acl=ensure_and_verify_recording_acl(mid, ready_ids, acl_cache=acl_cache, accept_view=True)
-  out={'ok':True, **picked, 'acl':acl, 'waiting':waiting}
-  if not acl.get('ok'):
-   out['acl_not_verified']=True
-   out['acl_degraded']=True
-  return out
+  return {'ok':True, **picked, 'waiting':waiting}
  except Exception as ex:
   return {'ok':False,'error':type(ex).__name__+': '+str(ex)[:400]}
-
-
-def send_ready(meeting_id, acl_cache=None):
- t=material_ready(meeting_id,'transcript')
- r=recording_share_ready(meeting_id, acl_cache=acl_cache)
- return {
-  'transcript': t,
-  'recording': r,
-  'both_ready': bool(t.get('ok') and r.get('ok')),
-  'minutes': {'ok': True, 'kind':'minutes','skipped':True,'error':None},
- }
 
 
 def _text_readback_ok(rb, expected_substr, dest):
@@ -1323,117 +1131,7 @@ def poller_send_text(meeting_id, target_chat_id, text, *, expected_substr, dry_r
   return dict(result, auto_send_key=key, dry_run=False)
 
 
-def poller_deliver_transcript_and_recording_link(meeting_id, target_chat_id, dry_run=False, readiness=None, acl_cache=None):
- """New auto-send: transcript MD file + recording crw share card. Does not auto-send minutes MD.
- Respects old already_auto_sent_both (transcript+minutes) as terminal — no resend/new format backfill.
- Pass readiness from Judgment B send_ready to avoid a second uncached send_ready (t219u).
- If readiness is omitted, falls back to send_ready(mid, acl_cache=acl_cache) for manual/compat callers.
- """
- mid=str(meeting_id)
- dest=resolve_poller_target(target_chat_id)
- if not is_feishu_assistant_created(mid):
-  raise PermissionError('Auto-send scope: feishu-assistant-created only')
- # Legacy completion: both transcript+minutes already verified => do not resend under new format
- legacy={}
- for kind in ('transcript','minutes'):
-  old,_,_=load_auto_send_ledger(mid, kind, dest['chat_id'])
-  legacy[kind]='verified' if old and (old.get('result') or {}).get('status')=='file-message-readback-verified' else 'pending'
- link_old,_,_=load_auto_send_ledger(mid, 'recording_link', dest['chat_id'])
- link_verified=bool(link_old and (link_old.get('result') or {}).get('status')=='text-message-readback-verified')
- if legacy['transcript']=='verified' and legacy['minutes']=='verified':
-  return {'sent':False,'reason':'already_auto_sent_both_legacy','statuses':legacy,'chat_id':dest['chat_id'],'dry_run':dry_run,'note':'historical dual MD send complete; not re-sent under new format'}
- if legacy['transcript']=='verified' and link_verified:
-  return {'sent':False,'reason':'already_auto_sent_transcript_and_link','statuses':{'transcript':'verified','recording_link':'verified'},'chat_id':dest['chat_id'],'dry_run':dry_run}
-
- # t219u: reuse B-window readiness (card_text/view_address/transcript + ACL verified_record_ids already applied).
- if readiness is None:
-  readiness=send_ready(mid, acl_cache=acl_cache)
- elif not isinstance(readiness, dict) or 'both_ready' not in readiness:
-  raise ValueError('readiness must be send_ready() result dict when provided')
- if not readiness.get('both_ready'):
-  return {'sent':False,'reason':'not_send_ready','readiness':readiness,'chat_id':dest['chat_id'],'dry_run':dry_run}
-
- would=[]; delivered=[]
- # 1) transcript file if needed
- if legacy['transcript']!='verified':
-  prepared=prepare({'meeting_id':mid,'kind':'transcript','format':'md'})
-  x=prepared['exports'][0]
-  would.append({'meeting_id':mid,'kind':'transcript','file_name':x['file_name'],'export_id':x['export_id']})
-  out=poller_send_prepared(x['export_id'], dest['chat_id'], dry_run=dry_run)
-  delivered.append(out)
-  if not dry_run and out.get('status')!='file-message-readback-verified':
-   raise RuntimeError('Auto-send transcript failed verification: status='+str(out.get('status')))
- else:
-  would.append({'meeting_id':mid,'kind':'transcript','already_verified':True})
-
- # 2) recording link text if needed
- if not link_verified:
-  card=readiness['recording']['card_text']
-  url=readiness['recording']['view_address']
-  if not is_stable_recording_share_url(url):
-   raise RuntimeError('refusing to send non-stable share url')
-  would.append({'meeting_id':mid,'kind':'recording_link','view_address':url,'card_text':card})
-  out=poller_send_text(mid, dest['chat_id'], card, expected_substr=url, dry_run=dry_run, kind='recording_link')
-  delivered.append(out)
-  if not dry_run and out.get('status')!='text-message-readback-verified':
-   raise RuntimeError('Auto-send recording link failed verification')
- else:
-  would.append({'meeting_id':mid,'kind':'recording_link','already_verified':True})
-
- return {
-  'sent': not dry_run,
-  'dry_run': dry_run,
-  'reason': 'ok',
-  'chat_id': dest['chat_id'],
-  'would_send': would,
-  'delivery': delivered,
-  'file_names': [readiness['transcript'].get('file_name')],
-  'recording_card': readiness['recording'].get('card_text'),
-  'view_address': readiness['recording'].get('view_address'),
-  'readiness': {
-   'transcript': {k:readiness['transcript'].get(k) for k in ('ok','file_name','error','bytes')},
-   'recording': {k:readiness['recording'].get(k) for k in ('ok','view_address','time_line','duration_text','meeting_record_id','error') if k in readiness['recording']},
-  },
- }
-
-
-def poller_deliver_dual(meeting_id, target_chat_id, dry_run=False):
- """Only when BOTH transcript and minutes are ready: prepare+send both. Never send one alone when the other is not ready yet.
- If one kind already verified in ledger and the other is not, send only the missing kind (crash recovery)."""
- mid=str(meeting_id)
- dest=resolve_poller_target(target_chat_id)
- if not is_feishu_assistant_created(mid):
-  raise PermissionError('Auto-send scope: feishu-assistant-created only')
- # Per-kind ledger status first (crash recovery may complete a missing kind).
- statuses={}
- for kind in ('transcript','minutes'):
-  old,_,_=load_auto_send_ledger(mid, kind, dest['chat_id'])
-  statuses[kind]='verified' if old and (old.get('result') or {}).get('status')=='file-message-readback-verified' else 'pending'
- readiness=dual_ready(mid)
- if statuses['transcript']=='verified' and statuses['minutes']=='verified':
-  return {'sent':False,'reason':'already_auto_sent_both','statuses':statuses,'chat_id':dest['chat_id'],'file_names':[readiness['transcript'].get('file_name'),readiness['minutes'].get('file_name')],'dry_run':dry_run}
- need=[k for k,s in statuses.items() if s!='verified']
- # Fresh dual-send: both must be ready. Recovery: only the missing kind must be ready.
- if len(need)==2 and not readiness['both_ready']:
-  return {'sent':False,'reason':'not_dual_ready','readiness':readiness,'statuses':statuses,'chat_id':dest['chat_id'],'dry_run':dry_run}
- if len(need)==1 and not readiness[need[0]].get('ok'):
-  return {'sent':False,'reason':'missing_kind_not_ready','readiness':readiness,'statuses':statuses,'chat_id':dest['chat_id'],'dry_run':dry_run}
- prepared=prepare({'meeting_id':mid,'kind':'both','format':'md'})
- by_kind={x['kind']:x for x in prepared['exports']}
- would=[]; delivered=[]
- for kind in ('transcript','minutes'):
-  if statuses[kind]=='verified':
-   continue
-  x=by_kind[kind]
-  would.append({'meeting_id':mid,'kind':kind,'file_name':x['file_name'],'export_id':x['export_id']})
-  out=poller_send_prepared(x['export_id'], dest['chat_id'], dry_run=dry_run)
-  delivered.append(out)
-  if not dry_run and out.get('status')!='file-message-readback-verified':
-   raise RuntimeError('Auto-send kind failed verification: '+kind+' status='+str(out.get('status')))
- return {'sent':not dry_run,'dry_run':dry_run,'reason':'ok','chat_id':dest['chat_id'],'would_send':would,'delivery':delivered,'file_names':[readiness['transcript']['file_name'],readiness['minutes']['file_name']],'readiness':readiness}
-
-
-# t296u independent automated delivery. Manual tools and legacy wrappers unchanged.
+# 按资料类型独立处理自动投递。
 def poller_deliver_component(meeting_id, kind, target_chat_id, component, *, dry_run=False, checkpoint=lambda:None):
  """Recover ledger first, cache ready material once, deliver only this missing kind."""
  mid=str(meeting_id)
@@ -1466,7 +1164,7 @@ def poller_deliver_component(meeting_id, kind, target_chat_id, component, *, dry
   if kind=='transcript':
    payload=prepare({'meeting_id':mid,'kind':'transcript','format':'md'})['exports'][0]
   else:
-   payload=recording_share_ready(mid,acl_cache={})
+   payload=recording_share_ready(mid)
    if not payload.get('ok'):
     error=payload.get('error') or 'recording_not_ready'
     if 'PollerQuotaError' in str(error) or '500246' in json.dumps(payload):raise PollerQuotaError('quota500246')

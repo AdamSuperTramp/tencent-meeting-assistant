@@ -236,7 +236,7 @@ def routed_rpc(body):
         return result
     if method=='tools/call' and name in [t['name'] for t in e.TOOLS]:
         try:
-            data=e.handle(name,params.get('arguments') or {},(params.get('_meta') or {}).get('openclaw/feishu-request'));audit(body,'export-local-success')
+            data=e.handle(name,params.get('arguments') or {},dict(ctx, sessionKey=session));audit(body,'export-local-success')
             return {'result':{'content':[{'type':'text','text':json.dumps(data,ensure_ascii=False)}]}}
         except Exception as ex:
             audit(body,'export-local-denied-or-error')
