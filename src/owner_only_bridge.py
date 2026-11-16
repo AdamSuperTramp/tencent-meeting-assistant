@@ -5,7 +5,7 @@ access if the fixed allowlist admission configuration changes. Same-UID shell
 access is NOT a security boundary; this is channel containment, not per-user data ACL.
 """
 import pathlib,json,importlib.util,datetime,os
-from settings import CODE_DIR, DATA_DIR, OWNER_OPEN_ID, OPENCLAW_CONFIG
+from settings import CODE_DIR, DATA_DIR, OWNER_OPEN_ID, OPENCLAW_CONFIG, TRUSTED_GROUP_IDS
 OWNER=OWNER_OPEN_ID
 CONFIG=OPENCLAW_CONFIG
 def exclusive_owner(c):
@@ -18,7 +18,8 @@ def exclusive_owner(c):
         and f.get('requireMention') is True
         and isinstance(f.get('groupAllowFrom'), list)
         and all(isinstance(x,str) and x.startswith('oc_') for x in f.get('groupAllowFrom',[]))
-        and len(f.get('groupAllowFrom',[]))>=1
+        and set(f.get('groupAllowFrom',[])) == TRUSTED_GROUP_IDS
+        and bool(TRUSTED_GROUP_IDS)
     )
     return (f.get('enabled') is True and f.get('dmPolicy')=='allowlist'
         and f.get('allowFrom')==[OWNER] and groups_ok
@@ -89,11 +90,13 @@ def _tool_call_payload(rpc_response):
         return None
     content=result.get('content') if isinstance(result, dict) else None
     if not (isinstance(content, list) and content):
-        return result if isinstance(result, dict) else None
+        return result if isinstance(result, dict) and not any(result.get(k) for k in ('error', 'error_info', 'failure')) else None
     text=(content[0] or {}).get('text','') if isinstance(content[0], dict) else ''
     try:
         env=json.loads(text)
     except Exception:
+        return None
+    if isinstance(env, dict) and (env.get('error') or env.get('error_info') or env.get('failure')):
         return None
     if isinstance(env, dict) and 'body' in env and 'status_code' in env:
         body=env.get('body')
@@ -102,7 +105,9 @@ def _tool_call_payload(rpc_response):
             except Exception:pass
         if env.get('status_code') not in (None, 200):
             return None
-        return body if isinstance(body, dict) else None
+        if isinstance(body, dict) and not any(body.get(k) for k in ('error', 'error_info', 'failure')):
+            return body
+        return None
     return env if isinstance(env, dict) else None
 
 def _feishu_request_meta(params):
@@ -159,6 +164,8 @@ def _sync_update_meeting_schedule(params, rpc_response):
     """Keep local start_time in sync after update_meeting (needed for start+20m gate)."""
     args = params.get('arguments') or {}
     payload = _tool_call_payload(rpc_response)
+    if payload is None:
+        return False
     row = {}
     if isinstance(payload, dict):
         rows = payload.get('meeting_info_list') or []
@@ -201,6 +208,21 @@ def _mark_cancelled_local(params, rpc_response):
 def routed_rpc(body):
     guard()
     method=body.get('method');params=body.get('params') or {};name=params.get('name')
+    if method == 'tools/call':
+        ctx = _feishu_request_meta(params)
+        session = ctx.get('sessionKey') or ctx.get('session_key') or ''
+        if ':feishu:group:' in session:
+            group = _chat_id_from_feishu_ctx(ctx)
+            if group not in TRUSTED_GROUP_IDS:
+                raise PermissionError('群聊未获授权')
+            import group_access
+            from types import SimpleNamespace
+            service = SimpleNamespace(**e.__dict__, _tool_call_payload=_tool_call_payload)
+            routed = group_access.route(service, name, params.get('arguments') or {}, lambda: guarded_rpc(body))
+            if routed is not None:
+                return routed
+        elif session not in ('agent:main:main', 'agent:main:feishu:dm:' + OWNER):
+            raise PermissionError('缺少可信的飞书请求会话')
     if method=='tools/list':
         result=guarded_rpc(body)
         result.setdefault('result',{}).setdefault('tools',[]).extend(e.TOOLS)
@@ -228,11 +250,7 @@ def routed_rpc(body):
             return {'result':{'isError':True,'content':[{'type':'text','text':'cancel_meeting blocked: meeting already ended/cancelled or has recordings/minutes ('+why+'). Export/transcript recovery must never cancel meetings.'}]}}
         result=guarded_rpc(body)
         try:
-            err=False
-            if isinstance(result, dict):
-                if result.get('error') or (isinstance(result.get('result'), dict) and result['result'].get('isError')):
-                    err=True
-            if not err:
+            if _tool_call_payload(result) is not None:
                 ok=_mark_cancelled_local(params, result)
                 audit(body, 'local-cancelled' if ok else 'local-cancel-mark-skip')
         except Exception:

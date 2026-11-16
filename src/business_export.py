@@ -10,6 +10,8 @@ OWNER=OWNER_OPEN_ID
 CLI=OPENCLAW_CLI
 NODE=NODE_BIN
 CONFIG=OPENCLAW_CONFIG
+from tencent_client import rpc as tencent_rpc, check_quota, PollerQuotaError
+import feishu_delivery
 from contextvars import ContextVar
 REQUEST_CONTEXT=ContextVar('feishu_request_context',default=None)
 TOOLS=[{'name':'prepare_meeting_export','description':'Generate real owner-accessible registered meeting minutes/transcript as Markdown from archived known source or live MCP for newly ended company meetings. Word/DOCX disabled. Exclusive-owner channel only; no sending. Returns opaque export IDs.','inputSchema':{'type':'object','additionalProperties':False,'properties':{'meeting_id':{'type':'string','pattern':'^[0-9]+$'},'kind':{'type':'string','enum':['minutes','transcript','both']},'format':{'type':'string','enum':['md'],'description':'Markdown only; Word/DOCX disabled by owner preference'}},'required':['meeting_id','kind','format']}},{'name':'send_prepared_meeting_export','description':'Send an already generated verified export through official Feishu channel to the single fixed owner. No arbitrary file path/recipient. Owner-only delivery latch is configured server-side; call this after prepare_meeting_export, not the unavailable generic message tool.','inputSchema':{'type':'object','additionalProperties':False,'properties':{'export_id':{'type':'string','pattern':'^[a-f0-9]{24}$'}},'required':['export_id']}}]
@@ -85,7 +87,8 @@ def record_feishu_assistant_created(meeting_id, subject=None, created_from_chat_
  now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat()
  data=load_feishu_created_provenance()
  prev=(data.get('meetings') or {}).get(mid) or {}
- entry={
+ entry=dict(prev)
+ entry.update({
   'meeting_id':mid,
   'subject':(subject if subject is not None else prev.get('subject')),
   'created_from_chat_id':(created_from_chat_id if created_from_chat_id is not None else prev.get('created_from_chat_id')),
@@ -94,7 +97,7 @@ def record_feishu_assistant_created(meeting_id, subject=None, created_from_chat_
   'mark':'company',
   'created_at':prev.get('created_at') or now,
   'updated_at':now,
- }
+ })
  if isinstance(extra,dict):
   # Durable schedule fields may be refreshed on create/update; other extras stay fill-once.
   refreshable={'start_time','end_time','time_zone','meeting_code','join_url','cancelled','cancelled_at','cancel_reason'}
@@ -181,12 +184,10 @@ def mcp_token():
  return load(secrets)['TENCENT_MEETING_TOKEN']
 
 def mcp_call(name,arguments):
- import urllib.request
  args=dict(arguments or {});args.update(CLIENT_INFO)
  body={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':name,'arguments':args}}
- req=urllib.request.Request(MCP_ENDPOINT,data=json.dumps(body).encode(),method='POST',headers={'Content-Type':'application/json','X-Tencent-Meeting-Token':mcp_token(),'X-Skill-Version':MCP_SKILL})
- with urllib.request.urlopen(req,timeout=120) as resp:
-  raw=json.loads(resp.read().decode())
+ raw=tencent_rpc(body,timeout=120,access_token=mcp_token())
+ check_quota(raw)
  if isinstance(raw,dict) and raw.get('error'):
   raise RuntimeError('MCP '+name+' error: '+str(raw['error']))
  result=raw.get('result',raw)
@@ -299,8 +300,13 @@ def ensure_registered(mid):
 
 def permitted(mid):
  if not re.fullmatch(r'[0-9]+',mid):raise ValueError('Invalid meeting ID')
- entry=ensure_registered(mid)
  ctx=REQUEST_CONTEXT.get() or {}
+ if ':feishu:group:' in ctx.get('sessionKey',''):
+  registry_path=BASE/'registry.json'
+  registry=load(registry_path).get('meetings',{}) if registry_path.exists() else {}
+  if registry.get(mid,{}).get('mark')!='company' and not is_feishu_assistant_created(mid):
+   raise PermissionError('Group access requires registered company meeting')
+ entry=ensure_registered(mid)
  if ':feishu:group:' in ctx.get('sessionKey','') and entry.get('mark')!='company':raise PermissionError('Private/pending meeting denied in group context')
  # Owner retains access to registered company/private/pending. This module has
  # no member route; future members must use a separate authenticated ACL adapter.
@@ -489,17 +495,11 @@ def delivery_request_identity():
   raise PermissionError('Missing trusted inbound message ID; refusing send without request idempotency')
  return ctx.get('sessionKey'),msg
 
+def read_feishu_message(message_id):
+ return feishu_delivery.read_message(message_id,node_bin=NODE,script=CODE_DIR/'feishu_message_get.mjs')
+
 def reconcile_delivery_result(result,dest):
- # A known candidate message can be read back without uploading/sending again.
- mid=result.get('message_id')
- if not mid:raise RuntimeError('Delivery outcome unknown; no message ID to verify. Refusing blind resend for this request; do not claim attachment was not sent.')
- env=dict(os.environ);env['PATH']=NODE+':/opt/homebrew/bin:/usr/bin:/bin'
- proc=subprocess.run([NODE+'/node',str(CODE_DIR/'feishu_message_get.mjs'),mid],capture_output=True,text=True,env=env,timeout=60)
- try:rb=json.loads(proc.stdout)
- except Exception:rb={}
- if not (rb.get('ok') and rb.get('msg_type')=='file' and rb.get('file_name')==result.get('file_name') and rb.get('file_key') and (dest['kind']!='group' or rb.get('chat_id')==dest['chat_id'])):
-  raise RuntimeError('Existing send still unverified; no upload retry. Do not claim attachment was not sent.')
- return dict(result,status='file-message-readback-verified',file_key=rb['file_key'],msg_type='file',readback_file_name=rb['file_name'],readback_chat_id=rb.get('chat_id'),readback_ok=True)
+ return feishu_delivery.reconcile_file(result,dest,readback=read_feishu_message)
 
 def send(args):
  import fcntl
@@ -650,6 +650,13 @@ def handle(name,args,request_context=None):
  finally:REQUEST_CONTEXT.reset(token)
 
 def _handle(name,args):
+ if name in ('get_meeting_delivery_status','retry_meeting_delivery'):
+  import meeting_delivery
+  # 本模块也可能由入口桥通过 importlib 加载，因此传递当前服务接口。
+  from types import SimpleNamespace
+  service=SimpleNamespace(**globals())
+  if name=='get_meeting_delivery_status':return meeting_delivery.status(service,args)
+  return meeting_delivery.retry(service,args)
  if name=='deliver_meeting_markdown':return deliver(args)
  if name=='deliver_meeting_recording_link':return deliver_recording_link(args)
  if name=='prepare_meeting_export':return prepare(args)
@@ -732,9 +739,7 @@ def deliver_recording_link(args):
   msg_id=find_id(payload)
   if not msg_id:
    raise RuntimeError('录播链接发送失败：无 message_id')
-  rb_proc=subprocess.run([NODE+'/node',str(CODE_DIR/'feishu_message_get.mjs'),msg_id],capture_output=True,text=True,env=env,timeout=60)
-  try: rb=json.loads(rb_proc.stdout or '{}')
-  except Exception: rb={}
+  rb=read_feishu_message(msg_id)
   ok=_text_readback_ok(rb, url, dest)
   if dest['kind']=='group':
    ok=ok and rb.get('chat_id')==dest['chat_id']
@@ -1238,17 +1243,7 @@ def send_ready(meeting_id, acl_cache=None):
 
 
 def _text_readback_ok(rb, expected_substr, dest):
- # t281u: OpenClaw may deliver multiline cards as Feishu post; accept text or post
- # when the share URL is present in extracted preview and chat matches.
- if not rb or not rb.get('ok'):
-  return False
- if rb.get('msg_type') not in ('text', 'post'):
-  return False
- if expected_substr and expected_substr not in (rb.get('text_preview') or ''):
-  return False
- if dest and dest.get('kind')=='group' and rb.get('chat_id')!=dest.get('chat_id'):
-  return False
- return True
+ return feishu_delivery.text_readback_ok(rb,expected_substr,dest)
 
 
 def poller_send_text(meeting_id, target_chat_id, text, *, expected_substr, dry_run=False, kind='recording_link'):
@@ -1277,9 +1272,7 @@ def poller_send_text(meeting_id, target_chat_id, text, *, expected_substr, dry_r
   if old and (old.get('result') or {}).get('message_id'):
    # try reconcile text
    mid_msg=old['result']['message_id']
-   proc=subprocess.run([NODE+'/node',str(CODE_DIR/'feishu_message_get.mjs'),mid_msg],capture_output=True,text=True,env=os.environ.copy(),timeout=60)
-   try: rb=json.loads(proc.stdout or '{}')
-   except Exception: rb={}
+   rb=read_feishu_message(mid_msg)
    # Reconcile against the URL actually sent (ledger), not a newly picked crm/crw URL.
    expected=(old.get('result') or {}).get('share_url') or expected_substr
    if _text_readback_ok(rb, expected, dest):
@@ -1321,9 +1314,7 @@ def poller_send_text(meeting_id, target_chat_id, text, *, expected_substr, dry_r
    # sometimes nested under result
    raise RuntimeError('feishu text send missing message_id: '+(proc.stdout or '')[:500])
   atomic_json(ledger, dict(identity, phase='sent-unverified', result={'message_id':msg_id,'share_url':expected_substr,'kind':kind,'chat_id':dest['chat_id']}))
-  rb_proc=subprocess.run([NODE+'/node',str(CODE_DIR/'feishu_message_get.mjs'),msg_id],capture_output=True,text=True,env=env,timeout=60)
-  try: rb=json.loads(rb_proc.stdout or '{}')
-  except Exception: rb={}
+  rb=read_feishu_message(msg_id)
   ok=_text_readback_ok(rb, expected_substr, dest)
   result={'status':'text-message-readback-verified' if ok else 'sent-text-readback-unverified','meeting_id':mid,'kind':kind,'chat_id':dest['chat_id'],'message_id':msg_id,'msg_type':rb.get('msg_type'),'text_preview':(rb.get('text_preview') or '')[:300],'share_url':expected_substr}
   atomic_json(ledger, dict(identity, phase=result['status'], result=result))
@@ -1443,10 +1434,6 @@ def poller_deliver_dual(meeting_id, target_chat_id, dry_run=False):
 
 
 # t296u independent automated delivery. Manual tools and legacy wrappers unchanged.
-class PollerQuotaError(RuntimeError):
- pass
-
-
 def poller_deliver_component(meeting_id, kind, target_chat_id, component, *, dry_run=False, checkpoint=lambda:None):
  """Recover ledger first, cache ready material once, deliver only this missing kind."""
  mid=str(meeting_id)
@@ -1469,45 +1456,48 @@ def poller_deliver_component(meeting_id, kind, target_chat_id, component, *, dry
    else:
     expected=result.get('share_url')
     if not expected:raise RuntimeError('Missing original share URL; no blind resend')
-    proc=subprocess.run([NODE+'/node',str(CODE_DIR/'feishu_message_get.mjs'),result['message_id']],capture_output=True,text=True,env=os.environ.copy(),timeout=60)
-    try:rb=json.loads(proc.stdout or '{}')
-    except Exception:rb={}
+    rb=read_feishu_message(result['message_id'])
     if not _text_readback_ok(rb,expected,dest):raise RuntimeError('Prior text readback unverified; no blind resend')
     result=dict(result,status=verified,readback_ok=True,msg_type=rb.get('msg_type'))
    atomic_json(ledger,dict(old,phase='verified',result=result))
   component.update(status='verified',sent_verified_at=component.get('sent_verified_at') or stamp(),delivery=result,last_error=None);checkpoint();return
  # A ready payload survives delivery failure/restart, so no repeated generation/query.
- original=mcp_call
- def guarded(name,args):
-  try:out=original(name,args)
-  except Exception as ex:
-   if '500246' in str(ex):raise PollerQuotaError('quota500246') from None
-   raise
-  if '500246' in json.dumps(out,ensure_ascii=False):raise PollerQuotaError('quota500246')
-  return out
- # Single-threaded poller under exclusive process lock; always restore callable.
- globals()['mcp_call']=guarded
- try:
-  if not component.get('ready_payload'):
-   if kind=='transcript':
-    payload=prepare({'meeting_id':mid,'kind':'transcript','format':'md'})['exports'][0]
-   else:
-    payload=recording_share_ready(mid,acl_cache={})
-    if not payload.get('ok'):
-     error=payload.get('error') or 'recording_not_ready'
-     if 'PollerQuotaError' in str(error) or '500246' in json.dumps(payload):raise PollerQuotaError('quota500246')
-     component.update(status='not_ready',last_error=error);checkpoint();return
-   component.update(ready_payload=payload,ready_at=component.get('ready_at') or stamp(),status='ready',last_error=None);checkpoint()
-  payload=component['ready_payload']
+ if not component.get('ready_payload'):
   if kind=='transcript':
-   result=poller_send_prepared(payload['export_id'],dest['chat_id'],dry_run=dry_run)
+   payload=prepare({'meeting_id':mid,'kind':'transcript','format':'md'})['exports'][0]
   else:
-   url=payload['view_address']
-   if not is_stable_recording_share_url(url):raise ValueError('Unstable share URL')
-   result=poller_send_text(mid,dest['chat_id'],payload['card_text'],expected_substr=url,dry_run=dry_run)
-  if dry_run:
-   component['status']='dry_run_ready';checkpoint();return
-  if result.get('status')!=verified:raise RuntimeError('Delivery not verified')
-  component.update(status='verified',sent_verified_at=stamp(),delivery=result,last_error=None);checkpoint()
- finally:
-  globals()['mcp_call']=original
+   payload=recording_share_ready(mid,acl_cache={})
+   if not payload.get('ok'):
+    error=payload.get('error') or 'recording_not_ready'
+    if 'PollerQuotaError' in str(error) or '500246' in json.dumps(payload):raise PollerQuotaError('quota500246')
+    component.update(status='not_ready',last_error=error);checkpoint();return
+  component.update(ready_payload=payload,ready_at=component.get('ready_at') or stamp(),status='ready',last_error=None);checkpoint()
+ payload=component['ready_payload']
+ if kind=='transcript':
+  result=poller_send_prepared(payload['export_id'],dest['chat_id'],dry_run=dry_run)
+ else:
+  url=payload['view_address']
+  if not is_stable_recording_share_url(url):raise ValueError('Unstable share URL')
+  result=poller_send_text(mid,dest['chat_id'],payload['card_text'],expected_substr=url,dry_run=dry_run)
+ if dry_run:
+  component['status']='dry_run_ready';checkpoint();return
+ if result.get('status')!=verified:raise RuntimeError('Delivery not verified')
+ component.update(status='verified',sent_verified_at=stamp(),delivery=result,last_error=None);checkpoint()
+
+
+# 进度查询与补查使用同一组工具参数，发送继续复用自动投递账本。
+for tool_name, description, retry_tool in (
+ ('get_meeting_delivery_status', '查询会后逐字稿和录播各自的投递进度，不发送资料。', False),
+ ('retry_meeting_delivery', '用户明确要求补查或补发时，检查并投递缺少的逐字稿或录播。目标为配置的自动投递群，私聊调用也投递到该群。复用既有账本，已有发送记录先核对。', True),
+):
+ properties = {
+  'meeting_id': {'type':'string','pattern':'^[0-9]+$'},
+  'target_chat_id': {'type':'string','description':'群聊传本轮 chat_id，私聊省略'},
+ }
+ if retry_tool:
+  properties['kind'] = {'type':'string','enum':['transcript','recording_link','missing']}
+ TOOLS.append({
+  'name':tool_name, 'description':description,
+  'inputSchema':{'type':'object','additionalProperties':False,'properties':properties,
+                 'required':['meeting_id','kind'] if retry_tool else ['meeting_id']},
+ })

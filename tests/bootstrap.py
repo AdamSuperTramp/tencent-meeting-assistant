@@ -45,6 +45,7 @@ for key, value in {
     'TMA_NODE_BIN': '/usr/bin',
     'TMA_PYTHON': '/usr/bin/python3',
     'TMA_OWNER_OPEN_ID': 'ou_fixture',
+    'TMA_TRUSTED_GROUP_IDS': '["oc_fixture"]',
     'TMA_AUTO_SEND_GROUP_ID': 'oc_fixture',
     'TMA_FEISHU_NODE_SDK_ENTRY': '',
     'TMA_SECRETS_FILE': TEST_HOME / '.config/secrets.json',

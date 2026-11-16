@@ -46,3 +46,5 @@ OWNER_OPEN_ID = os.environ.get("TMA_OWNER_OPEN_ID", _defaults["owner_open_id"])
 AUTO_SEND_GROUP_ID = os.environ.get("TMA_AUTO_SEND_GROUP_ID", _defaults["auto_send_group_id"])
 FEISHU_NODE_SDK_ENTRY = str(_path("feishu_node_sdk_entry"))
 SECRETS_FILE = _path("secrets_file")
+
+TRUSTED_GROUP_IDS = frozenset(json.loads(os.environ.get("TMA_TRUSTED_GROUP_IDS", json.dumps(_defaults.get("trusted_group_ids", [])))))

@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ -f "$HOME/.openclaw/automations/post-meeting-poller.PAUSED" ]]; then
+  exit 0
+fi
 export TMA_PROJECT_ROOT="$ROOT"
 export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 export PATH="$(python3 -c 'import json,pathlib,sys; p=pathlib.Path(sys.argv[1]); print(json.loads(p.read_text()).get("node_bin",""))' "$ROOT/config/runtime.local.json"):/opt/homebrew/bin:/usr/bin:/bin"

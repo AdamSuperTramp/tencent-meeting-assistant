@@ -10,30 +10,7 @@ from settings import SECRETS_FILE
 ENDPOINT = "https://mcp.meeting.tencent.com/mcp/wemeet-open/v1"
 SKILL_VERSION = "v1.1.0"
 
-def token():
-    t = os.environ.get("TENCENT_MEETING_TOKEN", "").strip()
-    if t:
-        return t
-    p = SECRETS_FILE
-    data = json.loads(p.read_text())
-    t = data.get("TENCENT_MEETING_TOKEN", "")
-    if not t:
-        raise SystemExit("TENCENT_MEETING_TOKEN missing")
-    return t
-
-def rpc(body: dict) -> dict:
-    req = urllib.request.Request(
-        ENDPOINT,
-        data=json.dumps(body).encode(),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-Tencent-Meeting-Token": token(),
-            "X-Skill-Version": SKILL_VERSION,
-        },
-    )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return json.loads(resp.read().decode())
+from tencent_client import rpc, token
 
 def unwrap_content(result: dict) -> dict:
     """If tool result text is {status_code,headers,body}, promote body to JSON text."""

@@ -17,6 +17,7 @@ BASE = DATA_DIR
 sys.path.insert(0, str(CODE_DIR))
 
 import business_export as e  # noqa: E402
+import brain_delivery
 import record_acl_grant as acl  # noqa: E402
 
 TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -116,7 +117,7 @@ def start_delay_minutes(cfg):
 
 def local_start_time(mid, prov_entry=None, registry_entry=None, cand=None):
     """Resolve durable local start_time only. Never invent; never MCP."""
-    for src in (cand or {}, prov_entry or {}, registry_entry or {}):
+    for src in (prov_entry or {}, registry_entry or {}, cand or {}):
         for key in ('start_time', 'scheduled_start'):
             dt = parse_dt(src.get(key))
             if dt is not None:
@@ -525,6 +526,34 @@ def process_candidate(mid, ended_meta, prov, cfg, state, force=False):
     return {'meeting_id': mid, 'action': cand['status'], 'b_attempts': cand['b_attempts']}
 
 
+def deliver_ready_brain_transcripts(cfg, state, prov, registry):
+    start = parse_dt(cfg.get('brain_delivery_since'))
+    target = cfg.get('target_chat_id')
+    if (not start or not cfg.get('enabled') or not cfg.get('send_enabled') or cfg.get('mode') != 'live'
+            or not target or target != DEFAULT_TARGET or os.environ.get('POST_MEETING_POLLER_FORCE_DRY') == '1'
+            or CONFIG_PATH.with_name('post-meeting-poller.PAUSED').exists()):
+        return
+    for mid, cand in state.get('candidates', {}).items():
+        origin = prov.get(mid) or {}
+        reg = registry.get(mid) or {}
+        created = parse_dt(origin.get('created_at'))
+        payload = cand.get('b_components', {}).get('transcript', {}).get('ready_payload') or {}
+        if (not created or created < start or origin.get('created_from_chat_id') != target
+                or not eligible_for_auto_send(mid, origin, cfg)[0] or reg.get('mark') != 'company'
+                or local_cancelled(origin, reg, cand) or not cand.get('a_ended_confirmed')
+                or not payload.get('export_id')):
+            continue
+        job = cand.setdefault('brain_delivery', {})
+        before = job.get('status'), job.get('retry_at')
+        if target not in e.allowed_group_chat_ids():
+            return
+        brain_delivery.deliver(mid, payload['export_id'], job, lambda: atomic_state_write(state))
+        if before != (job.get('status'), job.get('retry_at')):
+            log('brain_delivery', meeting_id=mid, status=job.get('status'), reason=job.get('reason'))
+            # 每轮最多处理一场，给下一次飞书轮询留出时间。
+            return
+
+
 def run_once(force_meeting_id=None, force_send=False):
     cfg, cfg_path = load_config()
     if force_send:
@@ -558,6 +587,14 @@ def run_once(force_meeting_id=None, force_send=False):
             reg = registry.get(mid) or {}
             cand = (state.get('candidates') or {}).get(mid) or {}
             st = cand.get('status')
+            latest_start = local_start_time(mid, p, reg, cand)
+            cached_start = parse_dt(cand.get('scheduled_start'))
+            if latest_start and cached_start and latest_start != cached_start and not cand.get('a_ended_confirmed') and st in ('watching', 'watching_in_progress', 'a_gave_up'):
+                cand['scheduled_start'] = latest_start.isoformat()
+                cand['next_a_check_at'] = None
+                cand['status'] = st = 'watching'
+                cand.pop('a_gave_up_at', None)
+                cand.pop('a_gave_up_why', None)
             if local_cancelled(p, reg, cand):
                 cancelled_skip.append(mid)
                 if mid in (state.get('candidates') or {}):
@@ -590,7 +627,7 @@ def run_once(force_meeting_id=None, force_send=False):
             deadline = a_deadline_at(start, cfg)
             # Persist fixed deadline from start (recomputed; never extended)
             c = candidate_record(state, mid)
-            c.setdefault('scheduled_start', start.isoformat())
+            c['scheduled_start'] = start.isoformat()
             c['a_arm_at'] = arm.isoformat()
             c['a_deadline_at'] = deadline.isoformat()
             c.setdefault('subject', p.get('subject') or reg.get('subject'))
@@ -710,6 +747,9 @@ def run_once(force_meeting_id=None, force_send=False):
             meta = ended.get(mid) or {'meeting_id': mid}
             force = bool(force_meeting_id and mid == str(force_meeting_id))
             results.append(process_candidate(mid, meta, p, cfg, state, force=force))
+
+        if not force_meeting_id and not force_send:
+            deliver_ready_brain_transcripts(cfg, state, prov, registry)
 
         state['updated_at'] = iso()
         state['last_cycle'] = {

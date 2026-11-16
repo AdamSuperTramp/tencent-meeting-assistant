@@ -9,5 +9,6 @@
   "owner_open_id": "",
   "auto_send_group_id": "",
   "feishu_node_sdk_entry": "~/.openclaw/npm/projects/feishu-plugin/node_modules/@openclaw/feishu/package.json",
-  "secrets_file": "~/.config/openclaw-pending/secrets.json"
+  "secrets_file": "~/.config/openclaw-pending/secrets.json",
+  "trusted_group_ids": []
 }
