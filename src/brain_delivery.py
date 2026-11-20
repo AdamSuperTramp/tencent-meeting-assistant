@@ -46,7 +46,7 @@ def post(path, body, content_type, token):
         conn.close()
 
 
-def transcript_file(mid, export_id):
+def transcript_manifest(mid, export_id):
     if not re.fullmatch(r"[a-f0-9]{24}", export_id):
         raise ValueError("invalid_export")
     manifest = json.loads((DATA_DIR / "exports" / (export_id + ".json")).read_text())
@@ -55,6 +55,11 @@ def transcript_file(mid, export_id):
             or manifest["format"] != "md" or manifest["export_id"] != export_id
             or Path(name).name != name or not name.lower().endswith(".md")):
         raise ValueError("invalid_manifest")
+    return manifest, name
+
+
+def transcript_file(mid, export_id):
+    manifest, name = transcript_manifest(mid, export_id)
     path = EXPORT_DIR / export_id / name
     if path.is_symlink() or path.parent.is_symlink():
         raise ValueError("invalid_path")
@@ -65,21 +70,31 @@ def transcript_file(mid, export_id):
 
 
 def upload(name, content, token):
+    """上传口只接收 file 字段；材料类型与日期改由 chat 的 message 说明。"""
     boundary = uuid.uuid4().hex
     safe_name = "".join("_" if c in '"\\' or unicodedata.category(c) == "Cc" else c for c in name)
-    prefix = (f'--{boundary}\r\nContent-Disposition: form-data; name="kind"\r\n\r\n逐字稿\r\n'
-              f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
+    prefix = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
               'Content-Type: text/markdown\r\n\r\n').encode()
     result = post("/mcp/upload", prefix + content + f"\r\n--{boundary}--\r\n".encode(),
                   "multipart/form-data; boundary=" + boundary, token)
-    source = result.get("source_id")
-    if not isinstance(source, str) or not re.fullmatch(r"src_[\w-]+", source):
-        raise ValueError("missing_source_id")
-    return source
+    attachment = result.get("attachment_id") if isinstance(result, dict) else None
+    if not isinstance(attachment, str) or not re.fullmatch(r"att_[\w-]+", attachment):
+        raise ValueError("missing_attachment_id")
+    return attachment
 
 
-def new_chat(source, token):
-    args = {"message": "这是一份腾讯会议逐字稿，请按原文处理。", "source_ids": [source], "wait": False}
+def material_message(name):
+    match = re.fullmatch(r"(\d{14})-(.+?)-(逐字稿文本|纪要文本)\.md", name)
+    if not match:
+        return "这是一份腾讯会议逐字稿，请按原文处理。"
+    stamp, subject, label = match.groups()
+    kind = "逐字稿" if "逐字稿" in label else "纪要"
+    day = f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]} {stamp[8:10]}:{stamp[10:12]}"
+    return f"这是一份腾讯会议{kind}：{day} {subject}，请按原文处理。"
+
+
+def new_chat(attachment, token, message):
+    args = {"message": message, "attachment_ids": [attachment], "wait": False}
     body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "chat", "arguments": args}}
     reply = post("/mcp", json.dumps(body).encode(), "application/json", token)
     result = reply.get("result") or {}
@@ -111,22 +126,27 @@ def deliver(mid, export_id, job, save):
         token = json.loads(SECRETS_FILE.read_text())["BRAIN_TOKEN"]
         if not isinstance(token, str) or not token.strip():
             raise ValueError("missing_token")
-        if not job.get("source_id"):
+        _, name = transcript_manifest(mid, export_id)
+        # 旧任务可能记录的是 source_id；上传回执可跨重启复用，避免重复上传。
+        attachment = job.get("attachment_id") or job.get("source_id")
+        if not attachment:
             name, content = transcript_file(mid, export_id)
     except (OSError, ValueError, KeyError, TypeError):
         job.update(status="retry", reason="credential_or_export_unavailable", retry_at=time.time() + 300)
         save()
         return
     try:
-        if not job.get("source_id"):
+        if not attachment:
             job.update(status="uploading", export_id=export_id)
             save()
-            job["source_id"] = upload(name, content, token)
+            attachment = upload(name, content, token)
+            job["attachment_id"] = attachment
+            job.pop("source_id", None)
             job["status"] = "uploaded"
             save()
         job["status"] = "opening"
         save()
-        conv = new_chat(job["source_id"], token)
+        conv = new_chat(attachment, token, material_message(name))
     except Rejected as exc:
         job.update(status="retry", reason=str(exc), retry_at=time.time() + 300)
     except (OSError, http.client.HTTPException, ValueError, TypeError, KeyError, AttributeError):
