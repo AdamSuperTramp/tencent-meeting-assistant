@@ -43,6 +43,8 @@ retry_meeting_delivery 仅在用户要求补查时调用。可选择逐字稿、
 
 改期仅在腾讯明确成功后同步，轮询优先读取最新登记时间，并重算尚未确认结束的任务时间。腾讯 HTTP 传输集中在 tencent_client.py，资料进度和补查集中在 meeting_delivery.py。
 
+腾讯响应可能在 HTTP 信封外附加 `_meta.hints` 版本提示，并将原信封移入 `data`。自动导出与 MCP 桥接共用兼容函数，先剥离该包装，再解析原有 `status_code` / `body`；保留旧格式支持和错误处理。若轮询持续报告 `a_no_meeting_row`，应检查响应包装，不能直接将缺少会议条目视为会议未结束。
+
 ## 企业大脑逐字稿
 
 会后自动化配置中的 `brain_delivery_since` 为带时区的 ISO 时间，删除该键即可关闭。仅接收启用后由自动投递目标群通过助手创建、已确认结束且登记为 company 的会议。后台从 OpenClaw 本机密钥文件读取 `BRAIN_TOKEN`。

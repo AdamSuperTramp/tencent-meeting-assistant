@@ -10,7 +10,7 @@ OWNER=OWNER_OPEN_ID
 CLI=OPENCLAW_CLI
 NODE=NODE_BIN
 CONFIG=OPENCLAW_CONFIG
-from tencent_client import rpc as tencent_rpc, check_quota, PollerQuotaError
+from tencent_client import rpc as tencent_rpc, check_quota, PollerQuotaError, unwrap_version_notice
 import feishu_delivery
 from contextvars import ContextVar
 REQUEST_CONTEXT=ContextVar('feishu_request_context',default=None)
@@ -199,6 +199,7 @@ def mcp_call(name,arguments):
  text=content[0].get('text','')
  try:env=json.loads(text)
  except Exception:return {'raw_text':text}
+ env=unwrap_version_notice(env)
  if isinstance(env,dict) and 'body' in env and 'status_code' in env:
   body=env.get('body')
   if isinstance(body,str):

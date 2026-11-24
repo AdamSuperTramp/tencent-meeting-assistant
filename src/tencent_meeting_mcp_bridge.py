@@ -10,7 +10,7 @@ from settings import SECRETS_FILE
 ENDPOINT = "https://mcp.meeting.tencent.com/mcp/wemeet-open/v1"
 SKILL_VERSION = "v1.1.0"
 
-from tencent_client import rpc, token
+from tencent_client import rpc, token, unwrap_version_notice
 
 def unwrap_content(result: dict) -> dict:
     """If tool result text is {status_code,headers,body}, promote body to JSON text."""
@@ -28,6 +28,7 @@ def unwrap_content(result: dict) -> dict:
             envelope = json.loads(text)
         except Exception:
             new_content.append(block); continue
+        envelope = unwrap_version_notice(envelope)
         if isinstance(envelope, dict) and "body" in envelope and "status_code" in envelope:
             body = envelope.get("body")
             if isinstance(body, (dict, list)):

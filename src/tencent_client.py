@@ -40,3 +40,12 @@ def rpc(body, *, timeout=60, access_token=None):
 def check_quota(value):
     if "500246" in json.dumps(value, ensure_ascii=False):
         raise PollerQuotaError("quota500246")
+
+
+def unwrap_version_notice(value):
+    """只剥离版本提示包装，保留 HTTP 状态和原始业务响应。"""
+    if isinstance(value, dict) and isinstance(value.get("_meta"), dict):
+        data = value.get("data")
+        if isinstance(data, dict) and "status_code" in data and "body" in data:
+            return data
+    return value
