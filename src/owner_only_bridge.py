@@ -6,6 +6,7 @@ access is NOT a security boundary; this is channel containment, not per-user dat
 """
 import pathlib,json,importlib.util,datetime,os
 from settings import CODE_DIR, DATA_DIR, OWNER_OPEN_ID, OPENCLAW_CONFIG, TRUSTED_GROUP_IDS
+from tencent_client import unwrap_version_notice
 OWNER=OWNER_OPEN_ID
 CONFIG=OPENCLAW_CONFIG
 def exclusive_owner(c):
@@ -96,6 +97,8 @@ def _tool_call_payload(rpc_response):
         env=json.loads(text)
     except Exception:
         return None
+    # 登记发生在展示层 unwrap_content 之前，必须在这里解析同一版本提示包装。
+    env=unwrap_version_notice(env)
     if isinstance(env, dict) and (env.get('error') or env.get('error_info') or env.get('failure')):
         return None
     if isinstance(env, dict) and 'body' in env and 'status_code' in env:

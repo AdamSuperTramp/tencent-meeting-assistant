@@ -3,8 +3,11 @@ import bootstrap
 import json
 import unittest
 from unittest import mock
+from pathlib import Path
+import tempfile
 
 import business_export as export
+import owner_only_bridge as owner
 import post_meeting_poller as poller
 import tencent_meeting_mcp_bridge as bridge
 from tencent_client import PollerQuotaError
@@ -62,6 +65,60 @@ class TencentResponseEnvelopeTests(unittest.TestCase):
         promoted = bridge.unwrap_content(result)
         self.assertTrue(promoted['isError'])
         self.assertEqual(promoted['content'][1], result['content'][1])
+
+
+class OwnerResponseEnvelopeTests(unittest.TestCase):
+    def test_created_meeting_is_registered_and_eligible_in_both_formats(self):
+        mid = '999000111222'
+        start = '2026-11-27T21:00:00+08:00'
+        payload = {'meeting_info_list': [{'meeting_id': mid, 'subject': '合成会议',
+                                         'start_time': start}]}
+        params = {'name': 'schedule_meeting', 'arguments': {'start_time': start},
+                  '_meta': {'openclaw/feishu-request': {
+                      'sessionKey': 'agent:main:feishu:group:oc_fixture'}}}
+        for wrapped in (False, True):
+            for encoded in (False, True):
+                with self.subTest(wrapped=wrapped, encoded=encoded), tempfile.TemporaryDirectory() as folder:
+                    base = Path(folder)
+                    (base / 'registry.json').write_text(json.dumps({'version': 1, 'meetings': {}}))
+                    reply = {'result': response(payload, wrapped=wrapped, encoded=encoded)}
+                    with mock.patch.object(owner.e, 'BASE', base), \
+                         mock.patch.object(owner.e, 'FEISHU_CREATED_PROVENANCE', base / 'created.json'), \
+                         mock.patch.object(owner, 'guard'), mock.patch.object(owner, 'audit'), \
+                         mock.patch.object(owner, 'guarded_rpc', return_value=reply) as remote:
+                        self.assertEqual(owner.routed_rpc({'method': 'tools/call', 'params': params}), reply)
+                        remote.assert_called_once()
+                        provenance = owner.e.load_feishu_created_provenance()['meetings']
+                        registry = json.loads((base / 'registry.json').read_text())['meetings']
+                        self.assertIn(mid, provenance)
+                        self.assertEqual(registry[mid]['mark'], 'company')
+                        self.assertEqual(provenance[mid]['created_from_chat_id'], 'oc_fixture')
+                        self.assertEqual(poller.local_start_time(mid, provenance[mid], registry[mid]).isoformat(), start)
+                        self.assertTrue(poller.eligible_for_auto_send(mid, provenance[mid],
+                                        {'target_chat_id': 'oc_fixture'})[0])
+                        self.assertIn(mid, poller.collect_known_company_mids(provenance, registry, {}))
+
+    def test_wrapped_update_uses_confirmed_response_schedule(self):
+        reply = {'result': response({'meeting_info_list': [{'meeting_id': '999000111222',
+                                  'start_time': '2026-11-27T22:00:00+08:00'}]}, wrapped=True)}
+        with mock.patch.object(owner.e, 'sync_local_meeting_schedule', return_value={'ok': True}) as sync:
+            self.assertTrue(owner._sync_update_meeting_schedule(
+                {'arguments': {'meeting_id': '999000111222', 'start_time': '2026-11-27T21:00:00+08:00'}}, reply))
+            self.assertEqual(sync.call_args.kwargs['start_time'], '2026-11-27T22:00:00+08:00')
+
+    def test_wrapped_failures_never_register_or_update(self):
+        for status, payload in ((403, {}), (200, {'error_info': {'code': 42}}),
+                                (503, {'meeting_info_list': [{'meeting_id': '999000111222'}]})):
+            with self.subTest(status=status, payload=payload), \
+                 mock.patch.object(owner.e, 'record_feishu_assistant_created') as create, \
+                 mock.patch.object(owner.e, 'sync_local_meeting_schedule') as update:
+                reply = {'result': response(payload, wrapped=True, status=status)}
+                params = {'arguments': {'meeting_id': '999000111222', 'start_time': '2026-11-27T21:00:00+08:00'}}
+                self.assertIsNone(owner._tool_call_payload(reply))
+                self.assertFalse(owner._record_schedule_meeting_company(params, reply))
+                self.assertFalse(owner._sync_update_meeting_schedule(params, reply))
+                create.assert_not_called()
+                update.assert_not_called()
 
 
 if __name__ == '__main__':
